@@ -1,13 +1,29 @@
-from pycnn import *
+from dynet import *
 from utils import ParseForest, read_conll, write_conll
 import utils, time, random
 import numpy as np
 
+#from pycnn import *
+
+class IndexableModel(Model):
+    def __getitem__(self, key):
+        self.IndexableModelIndex = {}
+        params = self.parameters_list()
+        for p in params:
+            self.IndexableModelIndex[p.name()] = p
+        lookup_params = self.lookup_parameters_list()
+        for lp in lookup_params:
+            assert lp.name() not in self.IndexableModelIndex, 'Name {} is both a parameter and lookup_parameter!'.format(lp.name())
+            self.IndexableModelIndex[lp.name()] = lp
+        key = '/' + key
+        if key not in self.IndexableModelIndex:
+            print('Available keys: {}'.format(list(self.IndexableModelIndex.keys())))
+        return self.IndexableModelIndex[key]
 
 class EasyFirstLSTM:
     def __init__(self, words, pos, rels, w2i, options):
         random.seed(1)
-        self.model = Model()
+        self.model = IndexableModel()
         self.trainer = AdamTrainer(self.model)
 
         self.activations = {'tanh': tanh, 'sigmoid': logistic, 'relu': rectify, 'tanh3': (lambda x: tanh(cwise_multiply(cwise_multiply(x, x), x)))}
@@ -58,34 +74,34 @@ class EasyFirstLSTM:
         self.vocab['*INITIAL*'] = 2
         self.pos['*INITIAL*'] = 2
 
-        self.model.add_lookup_parameters("word-lookup", (len(words) + 3, self.wdims))
-        self.model.add_lookup_parameters("pos-lookup", (len(pos) + 3, self.pdims))
-        self.model.add_lookup_parameters("rels-lookup", (len(rels), self.rdims))
+        self.model.add_lookup_parameters((len(words) + 3, self.wdims), name="word-lookup")
+        self.model.add_lookup_parameters((len(pos) + 3, self.pdims), name="pos-lookup")
+        self.model.add_lookup_parameters((len(rels), self.rdims), name="rels-lookup")
 
         self.nnvecs = 2
 
-        self.model.add_parameters("word-to-lstm", (self.ldims, self.wdims + self.pdims + (self.edim if self.external_embedding is not None else 0)))
-        self.model.add_parameters("word-to-lstm-bias", (self.ldims))
-        self.model.add_parameters("lstm-to-lstm", (self.ldims, self.ldims * self.nnvecs + self.rdims))
-        self.model.add_parameters("lstm-to-lstm-bias", (self.ldims))
+        self.model.add_parameters((self.ldims, self.wdims + self.pdims + (self.edim if self.external_embedding is not None else 0)), name="word-to-lstm")
+        self.model.add_parameters((self.ldims), name="word-to-lstm-bias")
+        self.model.add_parameters((self.ldims, self.ldims * self.nnvecs + self.rdims), name="lstm-to-lstm")
+        self.model.add_parameters((self.ldims), name="lstm-to-lstm-bias")
 
-        self.model.add_parameters("hidden-layer", (self.hidden_units, self.ldims * self.nnvecs * ((self.k + 1) * 2)))
-        self.model.add_parameters("hidden-bias", (self.hidden_units))
+        self.model.add_parameters((self.hidden_units, self.ldims * self.nnvecs * ((self.k + 1) * 2)), name="hidden-layer")
+        self.model.add_parameters((self.hidden_units), name="hidden-bias")
 
-        self.model.add_parameters("hidden2-layer", (self.hidden2_units, self.hidden_units))
-        self.model.add_parameters("hidden2-bias", (self.hidden2_units))
+        self.model.add_parameters((self.hidden2_units, self.hidden_units), name="hidden2-layer")
+        self.model.add_parameters((self.hidden2_units), name="hidden2-bias")
 
-        self.model.add_parameters("output-layer", (2, self.hidden2_units if self.hidden2_units > 0 else self.hidden_units))
-        self.model.add_parameters("output-bias", (2))
+        self.model.add_parameters((2, self.hidden2_units if self.hidden2_units > 0 else self.hidden_units), name="output-layer")
+        self.model.add_parameters((2), name="output-bias")
 
-        self.model.add_parameters("rhidden-layer", (self.hidden_units, self.ldims * self.nnvecs * ((self.k + 1) * 2)))
-        self.model.add_parameters("rhidden-bias", (self.hidden_units))
+        self.model.add_parameters((self.hidden_units, self.ldims * self.nnvecs * ((self.k + 1) * 2)), name="rhidden-layer")
+        self.model.add_parameters((self.hidden_units), name="rhidden-bias")
 
-        self.model.add_parameters("rhidden2-layer", (self.hidden2_units, self.hidden_units))
-        self.model.add_parameters("rhidden2-bias", (self.hidden2_units))
+        self.model.add_parameters((self.hidden2_units, self.hidden_units), name="rhidden2-layer")
+        self.model.add_parameters((self.hidden2_units), name="rhidden2-bias")
 
-        self.model.add_parameters("routput-layer", (2 * (len(self.irels) + 0), self.hidden2_units if self.hidden2_units > 0 else self.hidden_units))
-        self.model.add_parameters("routput-bias", (2 * (len(self.irels) + 0)))
+        self.model.add_parameters((2 * (len(self.irels) + 0), self.hidden2_units if self.hidden2_units > 0 else self.hidden_units), name="routput-layer")
+        self.model.add_parameters((2 * (len(self.irels) + 0)), name="routput-bias")
 
 
     def  __getExpr(self, forest, i, train):
@@ -128,7 +144,7 @@ class EasyFirstLSTM:
 
 
     def Load(self, filename):
-        self.model.load(filename)
+        self.model.populate(filename)
 
 
     def Init(self):
@@ -277,9 +293,10 @@ class EasyFirstLSTM:
                         	  self.builders[1].initial_state().add_input(root.vec)]
 
                 unassigned = {entry.id: sum([1 for pentry in sentence if pentry.parent_id == entry.id]) for entry in sentence}
+                #NOTE(prkriley): above looks like number of children; later gets decremented when gets child
 
                 while len(forest.roots) > 1:
-                    self.__evaluate(forest, True)
+                    self.__evaluate(forest, True) #NOTE(prkriley): this updates scores
                     bestValidOp, bestValidScore = None, float("-inf")
                     bestWrongOp, bestWrongScore = None, float("-inf")
 
@@ -297,6 +314,7 @@ class EasyFirstLSTM:
 
                                 oracleCost = unassigned[roots[child].id] + (0 if roots[child].parent_id not in rootsIds or roots[child].parent_id  == roots[parent].id else 1)
 
+                                #TODO(prkriley): better understand this branching
                                 if oracleCost == 0 and (roots[child].parent_id != roots[parent].id or roots[child].relation == rel):
                                     if bestValidScore < forest.roots[i].scores[irel][op]:
                                         bestValidScore = forest.roots[i].scores[irel][op]
@@ -313,12 +331,13 @@ class EasyFirstLSTM:
                                     bestWrongIRel, bestWrongRel = irel, rel
                                     bestWrongExpr = roots[bestWrongIndex].exprs[bestWrongIRel][bestWrongOp]
 
-                    if bestValidScore < bestWrongScore + 1.0:
+                    if bestValidScore < bestWrongScore + 1.0: #NOTE(prkriley): only gets loss if makes mistake (margin-wise)
                         loss = bestWrongExpr - bestValidExpr
                         mloss += 1.0 + bestWrongScore - bestValidScore
                         eloss += 1.0 + bestWrongScore - bestValidScore
                         errs.append(loss)
 
+                    #NOTE(prkriley): selecting which attachment to make
                     if not self.oracle or bestValidScore - bestWrongScore > 1.0 or (bestValidScore > bestWrongScore and random.random() > 0.1): 
                         selectedOp = bestValidOp
                         selectedParent = bestValidParent
@@ -340,10 +359,11 @@ class EasyFirstLSTM:
 
                     etotal += 1
 
+                    #TODO(prkriley): better understand this
                     for j in xrange(max(0, selectedIndex - self.k - 1), min(len(forest.roots), selectedIndex + self.k + 2)):
                         roots[j].scores = None
 
-                    unassigned[roots[selectedChild].parent_id] -= 1
+                    unassigned[roots[selectedChild].parent_id] -= 1 #NOTE(prkriley): seems to not care whether it was the correct child
 
                     roots[selectedParent].lstms[selectedOp] = roots[selectedParent].lstms[selectedOp].add_input(
                         	    self.activation( self.lstm2lstm *
@@ -374,5 +394,5 @@ class EasyFirstLSTM:
 
             renew_cg()
 
-        self.trainer.update_epoch()
+        #self.trainer.update_epoch() #TODO(prkriley): verify that AdamTrainer handles everything this did before
         print "Loss: ", mloss/iSentence
