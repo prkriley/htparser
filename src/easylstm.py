@@ -3,8 +3,6 @@ from utils import ParseForest, read_conll, write_conll
 import utils, time, random
 import numpy as np
 
-#from pycnn import *
-
 class IndexableModel(Model):
     def __getitem__(self, key):
         self.IndexableModelIndex = {}

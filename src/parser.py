@@ -1,5 +1,6 @@
 from optparse import OptionParser
-import json, utils, easylstm, os, pickle, time
+import json, utils, os, pickle, time
+import newlstm as easylstm
 
 if __name__ == '__main__':
     parser = OptionParser()
