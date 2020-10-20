@@ -242,6 +242,7 @@ class EasyFirstLSTM:
     def Predict(self, conll_path):
         with open(conll_path, 'r') as conllFP:
             for iSentence, sentence in enumerate(read_conll(conllFP, False)):
+                print("Sentence: {}".format([e.form for e in sentence]))
                 self.Init()
                 forest = ParseForest(sentence)
                 self.getWordEmbeddings(forest, False)
@@ -271,14 +272,26 @@ class EasyFirstLSTM:
                     ###
                     #TODO(prkriley): z score for ROOT should be impossible
                     z_scores = concatenate([r.zexpr for r in roots[1:]])
-                    bestIndex = np.argmax(softmax(z_scores).npvalue()) + 1
+                    p_z = softmax(z_scores).npvalue()
+                    bestIndex = np.argmax(p_z) + 1
+                    print('P(z): {}'.format(p_z))
+                    print('Best index: {} ({})'.format(bestIndex, roots[bestIndex].form))
                     #TODO(prkriley): p_y
-                    p_y = softmax(concatenate([val for tup in roots[bestIndex].exprs for val in tup]))
+                    valid_exprs = [val for tup in roots[bestIndex].exprs for val in tup]
+                    if bestIndex == len(roots) - 1:
+                        valid_exprs = valid_exprs[::2]
+                    p_y = softmax(concatenate(valid_exprs))
                     max_y_index = np.argmax(p_y.npvalue())
-                    bestOp = max_y_index % 2
+
+                    if bestIndex < len(roots) - 1:
+                        bestOp = max_y_index % 2
+                        bestIRelation = (max_y_index - bestOp) / 2
+                    else:
+                        bestOp = 0
+                        bestIRelation = max_y_index
+                    #TODO(prkriley): make sure op is valid
                     bestChild = bestIndex
-                    bestParent = bestIndex = [-1,1][bestOp]
-                    bestIRelation = (max_y_index - bestOp) / 2
+                    bestParent = bestIndex + [-1,1][bestOp]
                     bestRelation = self.irels[bestIRelation]
 
                     ###
@@ -312,7 +325,7 @@ class EasyFirstLSTM:
         #ltotal = 0
         max_quotient = float("-inf")
         min_quotient = float("inf")
-        NUM_SAMPLES = 2
+        NUM_SAMPLES = 10
 
         start = time.time()
 
@@ -336,6 +349,7 @@ class EasyFirstLSTM:
                     #lerrors = 0
                     #ltotal = 0
                 sample_errs = []
+                #print('Sentence: {}'.format(sentence))
                 for _ in xrange(NUM_SAMPLES):
 
                     forest = ParseForest(sentence)
@@ -367,6 +381,7 @@ class EasyFirstLSTM:
                         z_scores = concatenate([r.zexpr for r in roots[1:]])
                         valid_z_scores = concatenate([roots[j].zexpr for j in valid_zs])
                         p_zs = softmax(z_scores)
+                        #print("P(z): {}".format(p_zs.npvalue()))
                         q_zs = softmax(valid_z_scores)
                         q_zs_numpy = q_zs.npvalue()
                         q_zs_numpy /= np.sum(q_zs_numpy)
@@ -382,52 +397,14 @@ class EasyFirstLSTM:
                         op = 0 if roots[i].parent_id == roots[i-1].id else 1
                         #TODO(prkriley): verify correctness of this index math
                         neglog_p_y = pickneglogsoftmax(concatenate([val for tup in roots[i].exprs for val in tup]), irel*2 + op)
+                        #TODO(prkriley): change the softmax if p(z) picked the rightmost; only half the values are correct anyway?
 
-                        #log_p_z = log_softmax(concatenate([r.zexpr for r in roots]))[i] #TODO(prkriley): what's the difference between this and pick?
                         neglog_p_z = pickneglogsoftmax(z_scores, i-1)
-                        #errs.append(-1 * log_p_y - log_p_z)
                         errs.append(neglog_p_y + neglog_p_z)
                         log_p_total -= neglog_p_y.scalar_value()
-                        #mloss -= log_p_y.scalar_value()
                         mloss += neglog_p_y.scalar_value()
-                        #mloss -= log_p_z.scalar_value()
                         mloss += neglog_p_z.scalar_value()
 
-
-                        """
-                        EXCERPT ONE
-                        """
-                        """
-                        #TODO(prkriley): this loss will clearly change
-                        if bestValidScore < bestWrongScore + 1.0: #NOTE(prkriley): only gets loss if makes mistake (margin-wise)
-                            loss = bestWrongExpr - bestValidExpr
-                            mloss += 1.0 + bestWrongScore - bestValidScore
-                            eloss += 1.0 + bestWrongScore - bestValidScore
-                            errs.append(loss)
-                        """
-
-                        """
-                        #NOTE(prkriley): selecting which attachment to make
-                        if not self.oracle or bestValidScore - bestWrongScore > 1.0 or (bestValidScore > bestWrongScore and random.random() > 0.1): 
-                            selectedOp = bestValidOp
-                            selectedParent = bestValidParent
-                            selectedChild = bestValidChild
-                            selectedIndex = bestValidIndex
-                            selectedIRel, selectedRel = bestValidIRel, bestValidRel
-                        else:
-                            selectedOp = bestWrongOp
-                            selectedParent = bestWrongParent
-                            selectedChild = bestWrongChild
-                            selectedIndex = bestWrongIndex
-                            selectedIRel, selectedRel = bestWrongIRel, bestWrongRel
-
-                        if roots[selectedChild].parent_id  != roots[selectedParent].id or selectedRel != roots[selectedChild].relation:
-                            lerrors += 1
-                            if roots[selectedChild].parent_id  != roots[selectedParent].id:
-                                errors += 1
-                                eerrors += 1
-
-                        """
                         etotal += 1
                         
 
@@ -475,7 +452,7 @@ class EasyFirstLSTM:
                     #TODO(prkriley): scale by p/q which is exp(logp-logq)
                     #print("logp: {}; logq: {}".format(log_p_total, log_q_total))
                     pq_quotient = np.exp(log_p_total - log_q_total)
-                    scaled_pq_quotient = pq_quotient * 1
+                    scaled_pq_quotient = pq_quotient * 1e2
                     eerrs *= scaled_pq_quotient
                     #print("P/Q: {}".format(pq_quotient))
                     max_quotient = max(pq_quotient, max_quotient)
@@ -512,40 +489,3 @@ class EasyFirstLSTM:
 
         #self.trainer.update_epoch() #TODO(prkriley): verify that AdamTrainer handles everything this did before
         print "Loss: ", mloss/iSentence
-
-
-
-        #------------
-
-
-        """
-                    EXCERPT ONE
-                    #TODO(prkriley): the op thing has different semantics now
-                    for irel, rel in enumerate(self.irels):
-
-                        #for op in xrange(2):
-                        for op in [-1,1]:
-                            #child = i + (1 - op)
-                            child = i
-                            parent = i + op
-
-                            #oracleCost = unassigned[roots[child].id] + (0 if roots[child].parent_id not in rootsIds or roots[child].parent_id  == roots[parent].id else 1)
-
-                            #NOTE(prkriley): either relation is right, or it's wrong but it's the wrong parent anyway but oracle says ok
-                            if oracleCost == 0 and (roots[child].parent_id != roots[parent].id or roots[child].relation == rel):
-                                if bestValidScore < forest.roots[i].scores[irel][op]:
-                                    bestValidScore = forest.roots[i].scores[irel][op]
-                                    bestValidOp = op
-                                    bestValidParent, bestValidChild = parent, child
-                                    bestValidIndex = i
-                                    bestValidIRel, bestValidRel = irel, rel
-                                    bestValidExpr = roots[bestValidIndex].exprs[bestValidIRel][bestValidOp]
-                            elif bestWrongScore < forest.roots[i].scores[irel][op]:
-                                bestWrongScore = forest.roots[i].scores[irel][op]
-                                bestWrongParent, bestWrongChild = parent, child
-                                bestWrongOp = op
-                                bestWrongIndex = i
-                                bestWrongIRel, bestWrongRel = irel, rel
-                                bestWrongExpr = roots[bestWrongIndex].exprs[bestWrongIRel][bestWrongOp]
-        """
-
