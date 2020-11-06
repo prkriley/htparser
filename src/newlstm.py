@@ -152,7 +152,6 @@ class EasyFirstLSTM:
                 output, uoutput, zoutput = self.__getExpr(forest, i, train)
                 scrs = output.value()
                 uscrs = uoutput.value()
-                zscrs = zoutput.value()
                 forest.roots[i].exprs = [(pick(output, j * 2) + pick(uoutput, 0), pick(output, j * 2 + 1) + pick(uoutput, 1)) for j in xrange(len(self.irels))]
                 forest.roots[i].scores = [(scrs[j * 2] + uscrs[0], scrs[j * 2 + 1] + uscrs[1]) for j in xrange(len(self.irels))]
                 forest.roots[i].zexpr = zoutput
@@ -202,7 +201,7 @@ class EasyFirstLSTM:
         paddingPosVec = lookup(self.model["pos-lookup"], 1) if self.pdims > 0 else None
 
         paddingVec = tanh(self.word2lstm * concatenate(filter(None, [paddingWordVec, paddingPosVec, evec])) + self.word2lstmbias )
-	self.empty = (concatenate([self.builders[0].initial_state().add_input(paddingVec).output(), self.builders[1].initial_state().add_input(paddingVec).output()]))
+        self.empty = (concatenate([self.builders[0].initial_state().add_input(paddingVec).output(), self.builders[1].initial_state().add_input(paddingVec).output()]))
 
 
     def getWordEmbeddings(self, forest, train):
@@ -251,6 +250,10 @@ class EasyFirstLSTM:
                     root.lstms = [self.builders[0].initial_state().add_input(root.vec),
                                   self.builders[1].initial_state().add_input(root.vec)]
 
+                ###
+                #NOTE(prkriley): looking at truth here, but ONLY for reporting
+                unassigned = {entry.id: sum([1 for pentry in sentence if pentry.parent_id == entry.id]) for entry in sentence}
+                ###
                 while len(forest.roots) > 1:
 
                     self.__evaluate(forest, False)
@@ -258,30 +261,18 @@ class EasyFirstLSTM:
                     #bestIndex, bestOp = None, None
                     roots = forest.roots
 
-                    """
-                    for i in xrange(len(forest.roots) - 1):
-                        for irel, rel in enumerate(self.irels):
-                            for op in xrange(2):
-                                if bestScore < roots[i].scores[irel][op] and (i + (1 - op)) > 0:
-                                    bestParent, bestChild = i + op, i + (1 - op)
-                                    bestScore = roots[i].scores[irel][op]
-                                    bestIndex, bestOp = i, op
-                                    bestRelation, bestIRelation = rel, irel
-                    """
 
                     ###
-                    #TODO(prkriley): z score for ROOT should be impossible
                     z_scores = concatenate([r.zexpr for r in roots[1:]])
                     p_z = softmax(z_scores).npvalue()
                     bestIndex = np.argmax(p_z) + 1
                     print('P(z): {}'.format(p_z))
                     print('Best index: {} ({})'.format(bestIndex, roots[bestIndex].form))
-                    #TODO(prkriley): p_y
                     valid_exprs = [val for tup in roots[bestIndex].exprs for val in tup]
                     if bestIndex == len(roots) - 1:
                         valid_exprs = valid_exprs[::2]
                     p_y = softmax(concatenate(valid_exprs))
-                    max_y_index = np.argmax(p_y.npvalue())
+                    max_y_index = np.argmax(p_y.npvalue()) #NOTE(prkriley): don't need to actually do softmax just to pick max
 
                     if bestIndex < len(roots) - 1:
                         bestOp = max_y_index % 2
@@ -294,6 +285,18 @@ class EasyFirstLSTM:
                     bestParent = bestIndex + [-1,1][bestOp]
                     bestRelation = self.irels[bestIRelation]
 
+                    ###
+                    ###
+                    #NOTE(prkriley): again, using truth but only for reporting
+                    def _isValid(i):
+                        return (unassigned[roots[i].id] == 0) and ((i > 0 and roots[i].parent_id == roots[i-1].id) or (i < len(roots) - 1 and roots[i].parent_id == roots[i+1].id))
+                    valid_zs = [j for j in xrange(1,len(roots)) if _isValid(j)]
+                    valid_probs = [p_z[j-1] for j in valid_zs]
+                    invalid_probs = [p_z[j-1] for j in xrange(1,len(roots)) if j not in valid_zs]
+                    avg_valid_prob = sum(valid_probs) * 1.0/len(valid_probs) if valid_probs else -1
+                    avg_invalid_prob = sum(invalid_probs) * 1.0/len(invalid_probs) if invalid_probs else -1
+                    print("Avg valid prob: {}/{} = {}".format(sum(valid_probs), len(valid_probs), avg_valid_prob))
+                    print("Avg invalid prob: {}/{} = {}".format(sum(invalid_probs), len(invalid_probs), avg_invalid_prob))
                     ###
 
                     #for j in xrange(max(0, bestIndex - self.k - 1), min(len(forest.roots), bestIndex + self.k + 2)):
@@ -308,13 +311,14 @@ class EasyFirstLSTM:
                     roots[bestParent].lstms[bestOp] = roots[bestParent].lstms[bestOp].add_input((self.activation(self.lstm2lstmbias + self.lstm2lstm *
                         	concatenate([roots[bestChild].lstms[0].output(), lookup(self.model["rels-lookup"], bestIRelation), roots[bestChild].lstms[1].output()]))))
 
+                    unassigned[roots[bestChild].parent_id] -= 1 
                     forest.Attach(bestParent, bestChild)
 
                 renew_cg()
                 yield sentence
 
 
-    def Train(self, conll_path):
+    def Train(self, conll_path, options):
         mloss = 0.0
         errors = 0
         batch = 0
@@ -325,7 +329,7 @@ class EasyFirstLSTM:
         #ltotal = 0
         max_quotient = float("-inf")
         min_quotient = float("inf")
-        NUM_SAMPLES = 10
+        NUM_SAMPLES = options.num_samples #default 10
 
         start = time.time()
 
@@ -335,6 +339,7 @@ class EasyFirstLSTM:
 
             errs = []
             #eeloss = 0.0
+            batch_errs = []
 
             self.Init()
 
@@ -349,7 +354,11 @@ class EasyFirstLSTM:
                     #lerrors = 0
                     #ltotal = 0
                 sample_errs = []
+                sample_quotients = []
                 #print('Sentence: {}'.format(sentence))
+                DEBUG = random.random() < 0.0001
+                if DEBUG:
+                    print("Train sentence: {}".format([e.form for e in sentence]))
                 for _ in xrange(NUM_SAMPLES):
 
                     forest = ParseForest(sentence)
@@ -360,13 +369,11 @@ class EasyFirstLSTM:
                                   self.builders[1].initial_state().add_input(root.vec)]
 
                     unassigned = {entry.id: sum([1 for pentry in sentence if pentry.parent_id == entry.id]) for entry in sentence}
-                    #NOTE(prkriley): above looks like number of children; later gets decremented when gets child
 
                     #loss = 0
                     log_q_total = 0.0
                     log_p_total = 0.0
                     while len(forest.roots) > 1:
-                        #TODO(prkriley): sample the next z
                         self.__evaluate(forest, True) #NOTE(prkriley): this updates scores
                         roots = forest.roots
 
@@ -382,9 +389,13 @@ class EasyFirstLSTM:
                         valid_z_scores = concatenate([roots[j].zexpr for j in valid_zs])
                         p_zs = softmax(z_scores)
                         #print("P(z): {}".format(p_zs.npvalue()))
-                        q_zs = softmax(valid_z_scores)
+                        q_temperature = 16.0
+                        q_zs = softmax(valid_z_scores * 1.0/q_temperature)
                         q_zs_numpy = q_zs.npvalue()
                         q_zs_numpy /= np.sum(q_zs_numpy)
+                        if DEBUG:
+                            print("Valid z indices: {}".format(valid_zs))
+                            print("Q(z): {}".format(q_zs_numpy))
 
                         valid_i = np.random.choice(len(valid_zs),p=q_zs_numpy)
                         q_z = pick(q_zs, valid_i)
@@ -396,8 +407,13 @@ class EasyFirstLSTM:
                         irel = list(self.irels).index(roots[i].relation)
                         op = 0 if roots[i].parent_id == roots[i-1].id else 1
                         #TODO(prkriley): verify correctness of this index math
-                        neglog_p_y = pickneglogsoftmax(concatenate([val for tup in roots[i].exprs for val in tup]), irel*2 + op)
-                        #TODO(prkriley): change the softmax if p(z) picked the rightmost; only half the values are correct anyway?
+                        presoftmax_p_y = [val for tup in roots[i].exprs for val in tup]
+                        if i < len(roots) - 1:
+                            neglog_p_y = pickneglogsoftmax(concatenate(presoftmax_p_y), irel*2 + op)
+                        else:
+                            assert op == 0
+                            presoftmax_p_y = presoftmax_p_y[::2]
+                            neglog_p_y = pickneglogsoftmax(concatenate(presoftmax_p_y), irel)
 
                         neglog_p_z = pickneglogsoftmax(z_scores, i-1)
                         errs.append(neglog_p_y + neglog_p_z)
@@ -414,9 +430,6 @@ class EasyFirstLSTM:
                         selectedParent = i + [-1,1][op]
                         selectedIRel = irel
 
-                        #TODO(prkriley): better understand this
-                            #I think this is marking which ones need to be updated
-                        #for j in xrange(max(0, selectedIndex - self.k - 1), min(len(forest.roots), selectedIndex + self.k + 2)):
                         for j in xrange(max(0, selectedIndex - self.k - 2), min(len(forest.roots), selectedIndex + self.k + 2)):
                             roots[j].scores = None
 
@@ -431,61 +444,77 @@ class EasyFirstLSTM:
 
                         forest.Attach(selectedParent, selectedChild)
 
-                    """
-                    #TODO(prkriley): if we can get a stop_gradient, we can do p/q and multiply by the loss
-                        #this avoids having to mess with AdamTrainer implementation
-                    if len(errs) > 50.0:
-                        eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
-                        scalar_loss = eerrs.scalar_value() #NOTE(prkriley): I suspect that this line is not necessary
-                        #TODO(prkriley): get P/Q and call scalar_value(), then multiply by that
-                        eerrs.backward()
-                        self.trainer.update()
-                        errs = []
-                        lerrs = []
-
-                        renew_cg()
-                        self.Init()
-                    """
-                    #END OF SENTENCE
+                    #END OF SINGLE SAMPLE
                     #TODO(prkriley): finalize loss, do update, etc
                     eerrs = ((esum(errs)) * (1.0/(float(len(errs))))) #TODO(prkriley): consider removing this division
+                    #eerrs = esum(errs)
                     #TODO(prkriley): scale by p/q which is exp(logp-logq)
                     #print("logp: {}; logq: {}".format(log_p_total, log_q_total))
                     pq_quotient = np.exp(log_p_total - log_q_total)
-                    scaled_pq_quotient = pq_quotient * 1e2
-                    eerrs *= scaled_pq_quotient
+                    scaled_pq_quotient = pq_quotient * 1e3
+                    #scaled_pq_quotient = min(scaled_pq_quotient, 1.5e-5)
+                    #scaled_pq_quotient = max(scaled_pq_quotient, 1.5e-8)
+                    #eerrs *= scaled_pq_quotient
                     #print("P/Q: {}".format(pq_quotient))
-                    max_quotient = max(pq_quotient, max_quotient)
-                    min_quotient = min(pq_quotient, min_quotient)
+                    max_quotient = max(scaled_pq_quotient, max_quotient)
+                    min_quotient = min(scaled_pq_quotient, min_quotient)
                     eloss += eerrs.scalar_value()
                     sample_errs.append(eerrs)
-                    #eerrs.backward()
-                    #self.trainer.update()
+                    sample_quotients.append(scaled_pq_quotient)
                     errs = []
 
-                    #renew_cg()
-                    #self.Init()
-                #END OF SAMPLE
-                final_error = esum(sample_errs)
-                final_error.backward()
-                self.trainer.update()
+                    DEBUG = False
+                #END OF SAMPLING
+                #upper_clip = 5e-6
+                #lower_clip = 2e-8
 
-                renew_cg()
-                self.Init()
+
+                #scale = 1.0
+                #if max_quotient < lower_clip:
+                #    scale = lower_clip / max_quotient
+                ###
+                #SCALING QUOTIENTS
+
+                #max_sample_quotient = max(sample_quotients)
+                #if max_sample_quotient > upper_clip:
+                #    scale = upper_clip / max_sample_quotient
+                sum_quotients = sum(sample_quotients)
+                PQ_NORMALIZE_SUM = options.pq_norm
+                scale = PQ_NORMALIZE_SUM/sum_quotients
+                sample_quotients = [e*scale for e in sample_quotients]
+
+                #for q in sample_quotients:
+                #    assert q <= upper_clip * 1.1, "Large quotient: {}".format(q)
+                ###
+                if options.use_pq:
+                    sample_errs = [e*q for (e,q) in zip(sample_errs, sample_quotients)]
+
+                final_error = esum(sample_errs)
+                if not options.use_pq:
+                    assert len(sample_errs) == NUM_SAMPLES
+                    final_error *= (1.0/(float(len(sample_errs))))
+
+                #TODO(prkriley): put final_error somewhere and update once we have N of them
+                batch_errs.append(final_error)
+                if len(batch_errs) >= options.batch_size:
+                    total_error = esum(batch_errs)
+                    total_error.backward()
+                    self.trainer.update()
+                    batch_errs = []
+
+                    renew_cg()
+                    self.Init()
+
+
+                #final_error.backward()
+                #self.trainer.update()
+
+                #renew_cg()
+                #self.Init()
             #END OF EPOCH
         #FILE CLOSE
 
-        print("Max Quotient: {}; Min Quotient: {}".format(max_quotient, min_quotient))
-        if len(errs) > 0:
-            eerrs = (esum(errs)) * (1.0/(float(len(errs))))
-            eerrs.scalar_value()
-            eerrs.backward()
-            self.trainer.update()
-
-            errs = []
-            lerrs = []
-
-            renew_cg()
-
+        if options.use_pq:
+            print("Max Quotient: {}; Min Quotient: {}".format(max_quotient, min_quotient))
         #self.trainer.update_epoch() #TODO(prkriley): verify that AdamTrainer handles everything this did before
-        print "Loss: ", mloss/iSentence
+        print "Loss: ", mloss/(iSentence*NUM_SAMPLES)

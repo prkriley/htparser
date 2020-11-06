@@ -26,6 +26,10 @@ if __name__ == '__main__':
     parser.add_option("--disableblstm", action="store_false", dest="blstmFlag", default=True)
     parser.add_option("--predict", action="store_true", dest="predictFlag", default=False)
     parser.add_option("--cnn-seed", type="int", dest="seed", default=0)
+    parser.add_option("--nopq", action="store_false", dest="use_pq", default=True)
+    parser.add_option("--samples", type="int", dest="num_samples", default=10)
+    parser.add_option("--batch", type="int", dest="batch_size", default=1)
+    parser.add_option("--pq_norm", type="float", default=0.01)
 
 
     (options, args) = parser.parse_args()
@@ -64,7 +68,7 @@ if __name__ == '__main__':
 
         for epoch in xrange(options.epochs):
             print 'Starting epoch', epoch
-            parser.Train(options.conll_train)
+            parser.Train(options.conll_train, options)
             devpath = os.path.join(options.output, 'dev_epoch_' + str(epoch+1) + '.conll')
             utils.write_conll(devpath, parser.Predict(options.conll_dev))
             parser.Save(os.path.join(options.output, os.path.basename(options.model) + str(epoch+1)))
